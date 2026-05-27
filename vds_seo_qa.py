@@ -69,6 +69,10 @@ OPTIMIZATIONS = {
         "Indexation Audits",
         "Backlink QA & Analysis",
         "Disavow Spammy Backlinks",
+        "Caching Plugin (WP Rocket / LiteSpeed)",
+        "Image Compression (Imagify)",
+        "Fixed 404s & Broken URLs",
+        "New Page / URL Created",
     ],
     "On-Page Content": [
         "Metadata & Heading Structure",
@@ -238,6 +242,27 @@ GUIDED_QUESTIONS = {
         "Anchor text distribution audited for over-optimized exact-match keywords",
         "GSC checked for any manual action notices",
         "All flagged links documented in a tracker",
+    ],
+    "Image Compression (Imagify)": [
+        "Imagify plugin is confirmed active in the WordPress dashboard",
+        "Bulk compression was run on existing images",
+        "New images are being auto-compressed on upload",
+        "Page speed was re-tested after compression to confirm improvement",
+    ],
+    "Fixed 404s & Broken URLs": [
+        "All fixed URLs were verified to return 200 in the tracking spreadsheet",
+        "301 redirects were implemented where URLs changed permanently",
+        "Internal links pointing to old URLs were updated to the new destinations",
+    ],
+    "New Page / URL Created": [
+        "New page returns 200 and is accessible on the live site",
+        "Page has been submitted for indexing in Google Search Console",
+        "Page is linked to from at least one relevant internal page",
+    ],
+    "Caching Plugin (WP Rocket / LiteSpeed)": [
+        "Caching plugin (WP Rocket or LiteSpeed Cache) is confirmed active in the WordPress dashboard",
+        "Minification settings (CSS/JS) are enabled in the plugin",
+        "Caching was tested on the live site after configuration",
     ],
     "Disavow Spammy Backlinks": [
         "Disavow file follows correct syntax (one URL or domain per line with domain: prefix)",
@@ -428,6 +453,85 @@ def check_image_alt(soup):
         results.append(("Alt text coverage", "pass", f"All {len(imgs)} images have alt attributes"))
     if generic:
         results.append(("Generic alt text", "warn", f"{len(generic)} image(s) have generic alt text: {', '.join(generic[:3])}"))
+    return results
+
+def check_image_compression(soup, response):
+    results = []
+    imgs = soup.find_all("img", src=True)
+    if not imgs:
+        return [("Images", "info", "No images found on page")]
+
+    # Check for Imagify headers
+    headers = {k.lower(): v for k, v in response.headers.items()}
+    imagify_signals = ["x-imagify", "x-imagify-cache", "imagify"]
+    if any(s in str(headers) for s in imagify_signals):
+        results.append(("Imagify plugin", "pass", "Imagify headers detected"))
+    else:
+        results.append(("Imagify plugin", "info", "No Imagify headers detected — verify plugin is active in WP dashboard"))
+
+    # Check image formats
+    modern_formats = (".webp", ".avif")
+    legacy_formats = (".jpg", ".jpeg", ".png", ".gif", ".bmp")
+    modern, legacy, unknown = [], [], []
+
+    for img in imgs:
+        src = img.get("src", "").lower().split("?")[0]
+        if any(src.endswith(f) for f in modern_formats):
+            modern.append(src)
+        elif any(src.endswith(f) for f in legacy_formats):
+            legacy.append(src)
+
+    total = len(imgs)
+    if legacy and not modern:
+        results.append(("Image formats", "fail",
+                        f"All {len(legacy)} image(s) are legacy format (JPG/PNG) — no WebP/AVIF detected"))
+    elif legacy and modern:
+        results.append(("Image formats", "warn",
+                        f"{len(modern)} modern (WebP/AVIF) and {len(legacy)} legacy (JPG/PNG) — consider converting remaining"))
+    elif modern:
+        results.append(("Image formats", "pass",
+                        f"All {len(modern)} image(s) use modern formats (WebP/AVIF)"))
+    else:
+        results.append(("Image formats", "info", "Could not determine image formats from src attributes"))
+
+    return results
+
+def check_url_exists(check_url):
+    """Check if a specific URL returns 200."""
+    try:
+        resp = requests.get(check_url, timeout=10, allow_redirects=True,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200:
+            return [("Page exists", "pass", f"{check_url} returns 200 OK")]
+        else:
+            return [("Page exists", "fail", f"{check_url} returned status {resp.status_code}")]
+    except Exception as e:
+        return [("Page exists", "fail", f"Could not reach {check_url}: {e}")]
+
+def check_url_batch(urls_text):
+    """Check a list of URLs pasted as newline or comma-separated text."""
+    raw = re.split(r'[\n,]+', urls_text.strip())
+    urls = [u.strip() for u in raw if u.strip().startswith("http")]
+    if not urls:
+        return [("URL batch", "warn", "No valid URLs found — make sure each URL starts with http")]
+
+    results = []
+    for u in urls[:30]:  # cap at 30 to avoid timeouts
+        try:
+            resp = requests.get(u, timeout=8, allow_redirects=True,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200:
+                results.append((u[:70], "pass", "200 OK"))
+            elif resp.status_code in (301, 302):
+                results.append((u[:70], "warn", f"{resp.status_code} redirect — verify final destination"))
+            else:
+                results.append((u[:70], "fail", f"Status {resp.status_code}"))
+        except Exception as e:
+            results.append((u[:70], "fail", f"Could not reach: {str(e)[:50]}"))
+
+    if len(urls) > 30:
+        results.append(("Note", "info", f"Checked first 30 of {len(urls)} URLs — paste in batches for full coverage"))
+
     return results
 
 def check_canonical(soup, url):
@@ -707,9 +811,46 @@ def check_page_speed(url):
     except:
         return [("PageSpeed", "warn", "Could not retrieve — check manually at pagespeed.web.dev")]
 
+def check_caching(url, response):
+    results = []
+    headers = {k.lower(): v for k, v in response.headers.items()}
+
+    cache_signals = {
+        "WP Rocket":      ["x-wp-rocket", "x-rocket-id"],
+        "LiteSpeed":      ["x-litespeed-cache", "x-litespeed-tag", "x-lsadc"],
+        "Cloudflare":     ["cf-cache-status", "cf-ray"],
+        "WP Super Cache": ["x-wpsc-pre-compressed"],
+        "W3 Total Cache": ["x3-powered-by"],
+        "Generic Cache":  ["x-cache", "x-cache-hits", "x-cache-status"],
+    }
+
+    detected = []
+    for plugin, header_keys in cache_signals.items():
+        if any(h in headers for h in header_keys):
+            # Get the actual header value for context
+            for h in header_keys:
+                if h in headers:
+                    detected.append(f"{plugin} ({h}: {headers[h]})")
+                    break
+
+    if detected:
+        results.append(("Caching detected", "pass", " | ".join(detected)))
+    else:
+        results.append(("Caching plugin", "warn",
+                        "No caching headers detected — verify WP Rocket or LiteSpeed Cache is active and configured"))
+
+    # Also check for compression (a related performance signal)
+    encoding = headers.get("content-encoding", "")
+    if encoding in ("gzip", "br", "zstd"):
+        results.append(("Compression", "pass", f"Content is compressed ({encoding})"))
+    else:
+        results.append(("Compression", "warn", "No compression detected (gzip/brotli) — flag for dev team"))
+
+    return results
+
 # ─── Auto-Check Dispatcher ─────────────────────────────────────────────────────
 
-def run_auto_checks_for(opt, soup, url, domain):
+def run_auto_checks_for(opt, soup, url, domain, response=None):
     dispatch = {
         "Title Tag":                    lambda: check_title_tag(soup),
         "Meta Description":             lambda: check_meta_description(soup),
@@ -734,6 +875,9 @@ def run_auto_checks_for(opt, soup, url, domain):
         "Internal Links to Redirects":  lambda: check_internal_redirects(soup, url),
         "Section Design & FAQ Content": lambda: check_faq(soup),
         "TOC (Table of Contents)":      lambda: check_toc(soup),
+        "Caching Plugin (WP Rocket / LiteSpeed)": lambda: check_caching(url, response),
+        "Image Compression (Imagify)":  lambda: check_image_compression(soup, response),
+        "New Page / URL Created":       lambda: check_url_exists(new_page_url) if new_page_url else [("New page URL", "info", "Enter the new page URL in the field below the optimization list")],
     }
     if opt in dispatch and opt not in MANUAL_ONLY:
         return dispatch[opt]()
@@ -825,6 +969,27 @@ for idx, (category, opts) in enumerate(OPTIMIZATIONS.items()):
             if st.checkbox(label, key=f"chk_{opt}"):
                 selected_opts.append(opt)
 
+# ── Optional: New page URL (shown only when relevant opt is selected) ──
+new_page_url = ""
+if "New Page / URL Created" in selected_opts:
+    new_page_url = st.text_input(
+        "New page URL to verify",
+        placeholder="https://www.example.com/blog/",
+        help="Enter the URL of the new page — the tool will confirm it returns 200"
+    )
+
+# ── Optional: URL batch checker for 404 fixes ──
+batch_urls_input = ""
+if "Fixed 404s & Broken URLs" in selected_opts:
+    st.markdown("#### Paste Fixed URLs to Verify")
+    st.caption("Paste the URLs that were previously 404s — one per line or comma-separated. The tool will confirm each one is now live.")
+    batch_urls_input = st.text_area(
+        "Fixed URLs",
+        placeholder="https://example.com/page-one\nhttps://example.com/page-two",
+        height=120,
+        key="batch_urls"
+    )
+
 st.markdown("---")
 run_btn = st.button("🔍 Run QA Pass", type="primary",
                     disabled=(not url_input or not selected_opts or not specialist_name))
@@ -875,13 +1040,13 @@ if run_btn and url_input and selected_opts and specialist_name:
             # Merge overlapping checks
             if opt == "AIO AI Crawler Directives" and "Robots.txt Check" in fast_opts:
                 continue  # Will be covered by Robots.txt Check
-            results = run_auto_checks_for(opt, soup, url_input, domain)
+            results = run_auto_checks_for(opt, soup, url_input, domain, response)
             if results:
                 auto_results[opt] = results
 
         for opt in slow_opts:
             with st.spinner(f"Running {opt} — this may take a moment..."):
-                results = run_auto_checks_for(opt, soup, url_input, domain)
+                results = run_auto_checks_for(opt, soup, url_input, domain, response)
             if results:
                 auto_results[opt] = results
 
@@ -889,6 +1054,19 @@ if run_btn and url_input and selected_opts and specialist_name:
             with st.expander(f"**{opt}**", expanded=True):
                 for label, status, detail in results:
                     ri(label, status, detail)
+
+    # ── Batch URL checker ──
+    if "Fixed 404s & Broken URLs" in selected_opts and batch_urls_input.strip():
+        st.markdown("### Fixed 404s — URL Status Check")
+        with st.spinner("Checking URLs... this may take a moment for large lists."):
+            batch_results = check_url_batch(batch_urls_input)
+        auto_results["Fixed 404s & Broken URLs"] = batch_results
+        with st.expander("**Fixed 404s & Broken URLs**", expanded=True):
+            for label, status, detail in batch_results:
+                ri(label, status, detail)
+        fails_404 = sum(1 for _, s, _ in batch_results if s == "fail")
+        if fails_404:
+            st.error(f"{fails_404} URL(s) still returning errors — these need attention before closing the task.")
 
     # Guided checklist
     opts_with_guided = [o for o in selected_opts if o in GUIDED_QUESTIONS]
