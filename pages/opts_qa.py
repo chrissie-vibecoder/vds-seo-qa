@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; VDS-SEO-QA/1.0)"}
@@ -20,6 +21,9 @@ def parse_soup(html):
 
 def icon(status):
     return {"pass": "✅", "fail": "❌", "warn": "⚠️"}.get(status, "•")
+
+def normalize_url(url):
+    return url.strip().rstrip("/").lower()
 
 def has_updated_date(soup):
     patterns = [
@@ -105,31 +109,67 @@ def qa_onpage_url(url):
 
     return results
 
-def qa_link(anchor, target_url):
-    results = []
-    status_code, html = fetch_page(target_url)
-    if status_code is None:
-        return [
-            ("Target URL Live", "fail", f"Could not reach: {html}"),
-            ("Anchor Text on Page", "fail", "Skipped — page unreachable"),
-        ]
-    if status_code != 200:
-        return [
-            ("Target URL Live", "fail", f"HTTP {status_code}"),
-            ("Anchor Text on Page", "fail", "Skipped — page returned error"),
-        ]
-    results.append(("Target URL Live", "pass", f"HTTP {status_code}"))
-    soup = parse_soup(html)
-    page_text = soup.get_text(" ", strip=True).lower()
-    anchor_lower = anchor.strip().lower()
-    link_texts = [a.get_text(strip=True).lower() for a in soup.find_all("a")]
-    if anchor_lower in page_text:
-        results.append(("Anchor Text on Page", "pass", f"\"{anchor}\" found in page text"))
-    elif any(anchor_lower in lt for lt in link_texts):
-        results.append(("Anchor Text on Page", "pass", f"\"{anchor}\" found in link text"))
-    else:
-        results.append(("Anchor Text on Page", "fail", f"\"{anchor}\" NOT found on page — verify manually"))
-    return results
+def crawl_for_internal_link(base_url, anchor_text, target_url, max_pages, progress_callback=None):
+    """
+    Crawl the site starting from base_url.
+    Find all pages where anchor_text appears as link text pointing to target_url.
+    Returns: (found_instances, pages_checked, pages_with_wrong_target)
+    """
+    parsed_base = urlparse(base_url)
+    domain = parsed_base.scheme + "://" + parsed_base.netloc
+
+    visited = set()
+    to_visit = [base_url]
+    found_instances = []      # (source_page, href) where anchor matches and target matches
+    wrong_target = []         # (source_page, actual_href) where anchor matches but target wrong
+    pages_checked = 0
+
+    anchor_lower = anchor_text.strip().lower()
+    target_normalized = normalize_url(target_url)
+
+    while to_visit and pages_checked < max_pages:
+        url = to_visit.pop(0)
+        if normalize_url(url) in visited:
+            continue
+        visited.add(normalize_url(url))
+
+        status_code, html = fetch_page(url)
+        if status_code != 200 or not html:
+            continue
+
+        pages_checked += 1
+        if progress_callback:
+            progress_callback(pages_checked, url)
+
+        soup = parse_soup(html)
+
+        # Check all links on this page
+        for a_tag in soup.find_all("a", href=True):
+            link_text = a_tag.get_text(strip=True).lower()
+            if anchor_lower in link_text:
+                href = a_tag["href"]
+                full_href = urljoin(url, href).rstrip("/")
+                if normalize_url(full_href) == target_normalized:
+                    found_instances.append((url, full_href))
+                else:
+                    # Anchor text matches but points somewhere else
+                    if urlparse(full_href).netloc == parsed_base.netloc:
+                        wrong_target.append((url, full_href))
+
+        # Collect internal links to crawl
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            full = urljoin(url, href)
+            parsed = urlparse(full)
+            if parsed.netloc == parsed_base.netloc and parsed.scheme in ("http", "https"):
+                clean = full.split("#")[0].split("?")[0]
+                if normalize_url(clean) not in visited and clean not in to_visit:
+                    # Skip admin, feed, wp-, sitemap paths
+                    skip_patterns = ["/wp-admin", "/feed", "/wp-json", "xmlrpc", "sitemap"]
+                    if not any(p in clean for p in skip_patterns):
+                        to_visit.append(clean)
+
+    return found_instances, pages_checked, wrong_target
 
 def render_result(label, status, detail):
     ic = icon(status)
@@ -155,24 +195,23 @@ def results_to_text(month, on_page_results, link_results):
             for label, status, detail in checks:
                 lines.append(f"  {icon(status)} {label}: {detail}")
     if link_results:
-        lines.append("\nLINK BUILDING")
+        lines.append("\nLINK BUILDING (Internal Link Audit)")
         lines.append("-" * 40)
-        for anchor, target, checks in link_results:
-            lines.append(f"\nAnchor: {anchor}")
+        for anchor, target, pages_checked, found, wrong in link_results:
+            lines.append(f"\nAnchor: \"{anchor}\"")
             lines.append(f"Target: {target}")
-            for label, status, detail in checks:
-                lines.append(f"  {icon(status)} {label}: {detail}")
+            lines.append(f"Pages crawled: {pages_checked}")
+            if found:
+                lines.append(f"Found on {len(found)} page(s):")
+                for src, href in found:
+                    lines.append(f"  ✅ {src}")
+            else:
+                lines.append("  ❌ Not found on any crawled page")
+            if wrong:
+                lines.append(f"Anchor found but pointing to wrong target on {len(wrong)} page(s):")
+                for src, href in wrong:
+                    lines.append(f"  ⚠️ {src} -> {href}")
     lines.append("\n" + "=" * 60)
-    fails = sum(1 for _, checks in on_page_results for _, s, _ in checks if s == "fail")
-    fails += sum(1 for _, _, checks in link_results for _, s, _ in checks if s == "fail")
-    warns = sum(1 for _, checks in on_page_results for _, s, _ in checks if s == "warn")
-    warns += sum(1 for _, _, checks in link_results for _, s, _ in checks if s == "warn")
-    if fails:
-        lines.append(f"RESULT: {fails} FAIL(s), {warns} warning(s) — needs attention before closing.")
-    elif warns:
-        lines.append(f"RESULT: {warns} warning(s) — review before closing.")
-    else:
-        lines.append("RESULT: All checks passed.")
     return "\n".join(lines)
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
@@ -182,6 +221,8 @@ st.caption("Paste optimizations from the SEO Planning Workbook to run QA checks 
 month_label = st.text_input("Month / Period", placeholder="e.g. May 2026")
 
 st.divider()
+
+# ── On-Page Section ────────────────────────────────────────────────────────────
 st.subheader("On-Page Optimizations")
 st.caption("Paste the URLs from the On-Page rows in your planning workbook, one per line.")
 
@@ -193,39 +234,32 @@ onpage_input = st.text_area(
 )
 
 st.divider()
-st.subheader("Link Building")
-st.caption("Paste anchor and target URL pairs. Use alternating format: anchor line, then URL line, repeating.")
 
-link_format = st.radio(
-    "Paste format",
-    ["Alternating (anchor, URL, anchor, URL...)", "Two columns (anchors + targets separately)"],
-    horizontal=True,
+# ── Link Building Section ──────────────────────────────────────────────────────
+st.subheader("Link Building — Internal Link Audit")
+st.caption("Enter the site to crawl, then paste anchor text and target URL pairs. The tool will crawl the site and find every page where each anchor links to the correct target.")
+
+site_to_crawl = st.text_input(
+    "Site base URL to crawl",
+    placeholder="https://www.herrmannservices.com"
+)
+
+max_pages = st.slider("Max pages to crawl", min_value=10, max_value=200, value=50, step=10)
+
+st.caption("Paste anchor and target URL pairs below, alternating: anchor line, then target URL line.")
+
+link_input = st.text_area(
+    "Anchor + Target pairs",
+    height=130,
+    placeholder="water heater repair in West Chester, Ohio\nhttps://www.herrmannservices.com/west-chester-oh-furnace-airconditioner-plumbing-electrical-services/\nhvac service in Cincinnati\nhttps://www.herrmannservices.com/cincinnati-ac-repair/",
     label_visibility="collapsed"
 )
 
 link_pairs = []
-
-if link_format == "Alternating (anchor, URL, anchor, URL...)":
-    link_input = st.text_area(
-        "Anchor + Target pairs",
-        height=130,
-        placeholder="water heater repair in West Chester, Ohio\nhttps://www.herrmannservices.com/west-chester-oh-furnace-airconditioner-plumbing-electrical-services/\nhvac service in Cincinnati\nhttps://www.herrmannservices.com/cincinnati-ac-repair/",
-        label_visibility="collapsed"
-    )
-    if link_input.strip():
-        raw = [l.strip() for l in link_input.strip().splitlines() if l.strip()]
-        for i in range(0, len(raw) - 1, 2):
-            link_pairs.append((raw[i], raw[i+1]))
-else:
-    lc1, lc2 = st.columns(2)
-    with lc1:
-        anchors_input = st.text_area("Anchor Text (one per line)", height=110, placeholder="water heater repair in West Chester, Ohio\nhvac service in Cincinnati")
-    with lc2:
-        targets_input = st.text_area("Target URLs (one per line, same order)", height=110, placeholder="https://www.herrmannservices.com/west-chester-oh-...\nhttps://www.herrmannservices.com/cincinnati-ac-repair/")
-    if anchors_input.strip() and targets_input.strip():
-        anchors = [l.strip() for l in anchors_input.strip().splitlines() if l.strip()]
-        targets = [l.strip() for l in targets_input.strip().splitlines() if l.strip()]
-        link_pairs = list(zip(anchors, targets))
+if link_input.strip():
+    raw = [l.strip() for l in link_input.strip().splitlines() if l.strip()]
+    for i in range(0, len(raw) - 1, 2):
+        link_pairs.append((raw[i], raw[i+1]))
 
 st.divider()
 run_btn = st.button("Run QA Checks", type="primary", use_container_width=True)
@@ -240,6 +274,7 @@ if run_btn:
     on_page_results = []
     link_results = []
 
+    # ── On-Page Checks ─────────────────────────────────────────────────────────
     if onpage_urls:
         st.subheader(f"On-Page Results ({len(onpage_urls)} URLs)")
         prog = st.progress(0, text="Checking pages...")
@@ -253,32 +288,77 @@ if run_btn:
             st.divider()
         prog.progress(1.0, text="On-page checks complete.")
 
-    if link_pairs:
-        st.subheader(f"Link Building Results ({len(link_pairs)} pairs)")
-        prog2 = st.progress(0, text="Checking links...")
-        for i, (anchor, target) in enumerate(link_pairs):
-            prog2.progress(i / len(link_pairs), text=f"Checking {i+1}/{len(link_pairs)}...")
-            checks = qa_link(anchor, target)
-            link_results.append((anchor, target, checks))
-            st.markdown(f"**Anchor:** {anchor}")
-            st.markdown(f"**Target:** {target}")
-            for label, status, detail in checks:
-                render_result(label, status, detail)
-            st.divider()
-        prog2.progress(1.0, text="Link checks complete.")
+    # ── Link Building Crawl ────────────────────────────────────────────────────
+    if link_pairs and site_to_crawl.strip():
+        st.subheader("Link Building Results")
+        st.info(f"Crawling up to {max_pages} pages on {site_to_crawl} — this may take a minute.")
 
+        crawl_status = st.empty()
+        prog_link = st.progress(0, text="Starting crawl...")
+
+        # We crawl once and check all anchors against the same crawled pages
+        # For efficiency, crawl per anchor/target pair
+        for anchor, target in link_pairs:
+            st.markdown(f"**Anchor:** \"{anchor}\"")
+            st.markdown(f"**Target:** {target}")
+
+            pages_checked_count = [0]
+            status_placeholder = st.empty()
+
+            def update_progress(count, current_url):
+                pages_checked_count[0] = count
+                prog_link.progress(
+                    min(count / max_pages, 1.0),
+                    text=f"Crawling page {count}/{max_pages}: {current_url[:60]}..."
+                )
+                status_placeholder.caption(f"Last checked: {current_url}")
+
+            found, pages_checked, wrong = crawl_for_internal_link(
+                site_to_crawl.strip(),
+                anchor,
+                target,
+                max_pages,
+                progress_callback=update_progress
+            )
+
+            link_results.append((anchor, target, pages_checked, found, wrong))
+            status_placeholder.empty()
+
+            if found:
+                st.success(f"✅ Found on {len(found)} page(s):")
+                for src, href in found:
+                    st.markdown(f"- {src}")
+            else:
+                st.error("❌ Not found on any crawled page — link may not be placed yet or anchor text doesn't match exactly.")
+
+            if wrong:
+                st.warning(f"⚠️ Anchor text found on {len(wrong)} page(s) but pointing to a different target:")
+                for src, href in wrong:
+                    st.markdown(f"- {src} points to: {href}")
+
+            st.caption(f"{pages_checked} pages crawled")
+            st.divider()
+
+        prog_link.progress(1.0, text="Crawl complete.")
+
+    elif link_pairs and not site_to_crawl.strip():
+        st.warning("Enter a site base URL to crawl for the link building check.")
+
+    # ── Summary ────────────────────────────────────────────────────────────────
     all_statuses = [s for _, checks in on_page_results for _, s, _ in checks]
-    all_statuses += [s for _, _, checks in link_results for _, s, _ in checks]
     fails = all_statuses.count("fail")
     warns = all_statuses.count("warn")
 
-    if fails:
-        st.error(f"{fails} item(s) failed QA — review before closing the Teamwork task.")
-    elif warns:
-        st.warning(f"{warns} warning(s) — review and confirm before closing.")
-    else:
-        st.success("All checks passed. Safe to close the Teamwork task.")
+    if on_page_results:
+        if fails:
+            st.error(f"{fails} on-page item(s) failed QA — review before closing the Teamwork task.")
+        elif warns:
+            st.warning(f"{warns} on-page warning(s) — review and confirm before closing.")
+        else:
+            st.success("All on-page checks passed.")
 
-    st.subheader("Copy Report to Teamwork")
-    report_text = results_to_text(month_label or "Not specified", on_page_results, link_results)
-    st.code(report_text, language=None)
+    # ── Report ─────────────────────────────────────────────────────────────────
+    if on_page_results or link_results:
+        st.subheader("Copy Report to Teamwork")
+        report_text = results_to_text(month_label or "Not specified", on_page_results, link_results)
+        st.code(report_text, language=None)
