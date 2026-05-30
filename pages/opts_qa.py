@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import re
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
+import json
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; VDS-SEO-QA/1.0)"}
@@ -21,7 +22,6 @@ def check_redirect(url):
     try:
         r = requests.get(url.strip(), headers=HEADERS, timeout=15, allow_redirects=True)
         final = r.url.rstrip("/")
-        original = url.strip().rstrip("/")
         hops = len(r.history)
         return r.status_code, final, hops
     except Exception as e:
@@ -34,7 +34,6 @@ def icon(status):
     return {"pass": "✅", "fail": "❌", "warn": "⚠️"}.get(status, "•")
 
 def find_updated_date_text(soup):
-    """Return the actual text snippet containing the updated date, or None."""
     patterns = [
         r'(updated\s+on\s+[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})',
         r'(last\s+updated[:\s]+[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})',
@@ -47,13 +46,11 @@ def find_updated_date_text(soup):
         m = re.search(p, text, re.IGNORECASE)
         if m:
             return m.group(1).strip()
-    # Check schema for dateModified
     for s in soup.find_all("script", type="application/ld+json"):
         if s.string and "dateModified" in s.string:
             m = re.search(r'"dateModified"\s*:\s*"([^"]+)"', s.string)
             if m:
                 return f"dateModified in schema: {m.group(1)}"
-    # Check meta tags
     for tag in soup.find_all("meta"):
         prop = (tag.get("property") or tag.get("name") or "").lower()
         if "modified" in prop or "updated" in prop:
@@ -63,8 +60,6 @@ def find_updated_date_text(soup):
     return None
 
 def get_schema_types(soup):
-    """Return list of schema @type values found on page."""
-    import json
     types = []
     for s in soup.find_all("script", type="application/ld+json"):
         if s.string:
@@ -85,17 +80,12 @@ def get_schema_types(soup):
     return types
 
 def validate_heading_hierarchy(soup):
-    """
-    Check heading hierarchy. Returns list of (label, status, detail) results.
-    """
     results = []
     headings = [(tag.name, tag.get_text(strip=True)) for tag in soup.find_all(["h1","h2","h3","h4"])]
-
     h1s = [h for h in headings if h[0] == "h1"]
     h2s = [h for h in headings if h[0] == "h2"]
     h3s = [h for h in headings if h[0] == "h3"]
 
-    # H1 count
     if len(h1s) == 1:
         results.append(("H1", "pass", f"\"{h1s[0][1][:80]}\""))
     elif len(h1s) == 0:
@@ -103,32 +93,29 @@ def validate_heading_hierarchy(soup):
     else:
         results.append(("H1", "warn", f"{len(h1s)} H1s found: {'; '.join(h[1][:40] for h in h1s)}"))
 
-    # H2s
     if h2s:
         results.append(("H2s", "pass", "; ".join(h[1][:50] for h in h2s)))
     else:
         results.append(("H2s", "warn", "No H2 tags found"))
 
-    # H3s
     if h3s:
         results.append(("H3s", "pass", "; ".join(h[1][:50] for h in h3s)))
     else:
         results.append(("H3s", "warn", "No H3 tags found"))
 
-    # Hierarchy violations
     violations = []
     level_map = {"h1": 1, "h2": 2, "h3": 3, "h4": 4}
     prev_level = 0
     for tag_name, text in headings:
         level = level_map.get(tag_name, 0)
         if prev_level > 0 and level > prev_level + 1:
-            violations.append(f"Jumps from H{prev_level} to H{level}: \"{text[:40]}\"")
+            violations.append(f"H{prev_level} to H{level}: \"{text[:40]}\"")
         prev_level = level
 
     if violations:
         results.append(("Hierarchy", "warn", "Skipped levels: " + "; ".join(violations)))
     else:
-        results.append(("Hierarchy", "pass", "Heading order is logical — no skipped levels"))
+        results.append(("Hierarchy", "pass", "No skipped heading levels"))
 
     return results
 
@@ -144,7 +131,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
     parsed = urlparse(url)
     domain = parsed.netloc
 
-    # Title tag
     title_text = ""
     title_tag = soup.find("title")
     if title_tag and title_tag.get_text(strip=True):
@@ -159,7 +145,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
     else:
         results.append(("Title Tag", "fail", "Missing title tag"))
 
-    # Meta description
     meta_text = ""
     meta_desc = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
     if meta_desc and meta_desc.get("content", "").strip():
@@ -174,7 +159,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
     else:
         results.append(("Meta Description", "fail", "Missing meta description"))
 
-    # Canonical
     canonical = soup.find("link", rel="canonical")
     if canonical and canonical.get("href"):
         href = canonical["href"].strip().rstrip("/")
@@ -186,7 +170,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
     else:
         results.append(("Canonical", "warn", "No canonical tag found"))
 
-    # Primary keyword check
     if primary_keyword.strip():
         kw = primary_keyword.strip().lower()
         hits = []
@@ -198,15 +181,13 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
         if not missing:
             results.append(("Primary Keyword", "pass", f"\"{primary_keyword}\" found in: {', '.join(hits)}"))
         elif hits:
-            results.append(("Primary Keyword", "warn", f"\"{primary_keyword}\" found in {', '.join(hits)} but missing from: {', '.join(missing)}"))
+            results.append(("Primary Keyword", "warn", f"\"{primary_keyword}\" found in {', '.join(hits)}, missing from: {', '.join(missing)}"))
         else:
             results.append(("Primary Keyword", "fail", f"\"{primary_keyword}\" not found in Title, H1, or Meta Description"))
 
-    # Heading hierarchy
     heading_results = validate_heading_hierarchy(soup)
     results.extend(heading_results)
 
-    # Updated date
     if checks_config.get("updated_date"):
         snippet = find_updated_date_text(soup)
         if snippet:
@@ -214,7 +195,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
         else:
             results.append(("Updated Date", "fail", "No 'Updated On' date detected — add or verify manually"))
 
-    # Schema
     if checks_config.get("schema"):
         schema_types = get_schema_types(soup)
         if schema_types:
@@ -222,7 +202,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
         else:
             results.append(("Schema", "fail", "No schema markup found"))
 
-    # Internal links
     if checks_config.get("internal_links"):
         all_links = soup.find_all("a", href=True)
         internal = []
@@ -240,7 +219,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
         else:
             results.append(("Internal Links", "fail", "No internal links found"))
 
-    # Alt text audit
     if checks_config.get("alt_text"):
         imgs = soup.find_all("img")
         missing_alt = [img for img in imgs if not img.get("alt", "").strip()]
@@ -253,12 +231,10 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
             srcs = "; ".join((img.get("src","")[:40] or "unknown") for img in missing_alt[:3])
             results.append(("Alt Text", "fail", f"{len(missing_alt)}/{total} image(s) missing alt text: {srcs}{'...' if len(missing_alt) > 3 else ''}"))
 
-    # Nav tab count
     if checks_config.get("nav_count"):
         nav = soup.find("nav")
         if nav:
             top_links = [a for a in nav.find_all("a", href=True) if a.get_text(strip=True)]
-            # Try to get only top-level items
             count = len(top_links)
             if count <= 7:
                 results.append(("Nav Tabs", "pass", f"{count} nav link(s) found — within limit"))
@@ -267,25 +243,6 @@ def qa_onpage_url(url, checks_config, primary_keyword=""):
         else:
             results.append(("Nav Tabs", "warn", "No <nav> element found — check manually"))
 
-    return results
-
-def check_redirects_auto(urls):
-    """Check a list of URLs for redirect status. Returns list of (url, status, detail)."""
-    results = []
-    for url in urls:
-        code, final, hops = check_redirect(url)
-        if code is None:
-            results.append((url, "fail", f"Could not reach: {final}"))
-        elif code == 200 and hops == 0:
-            results.append((url, "pass", "Returns 200 directly"))
-        elif code == 200 and hops == 1:
-            results.append((url, "pass", f"Redirects cleanly to: {final}"))
-        elif code == 200 and hops > 1:
-            results.append((url, "warn", f"Redirect chain ({hops} hops) → {final}"))
-        elif code in (301, 302):
-            results.append((url, "warn", f"HTTP {code} — still redirecting, not resolving to 200"))
-        else:
-            results.append((url, "fail", f"HTTP {code} — not resolving correctly"))
     return results
 
 def parse_opt_notes(notes):
@@ -298,7 +255,6 @@ def parse_opt_notes(notes):
         "nav_count": False,
     }
     manual_items = []
-    redirect_urls = []
 
     if any(k in notes_lower for k in ["updated on", "update blog date", "blog date", "updated on date", "content revision"]):
         checks["updated_date"] = True
@@ -318,7 +274,7 @@ def parse_opt_notes(notes):
         manual_items.append("Verify geo target (city/region) is present in title or H1")
 
     if any(k in notes_lower for k in ["404", "redirect"]):
-        manual_items.append("Paste any specific 404 URLs into the Redirect Checker below")
+        manual_items.append("Paste 404 URLs into the Redirect Checker section below")
 
     if any(k in notes_lower for k in ["alt tag", "alt text", "missing alt"]):
         checks["alt_text"] = True
@@ -394,6 +350,59 @@ def results_to_text(month, specialist, client, on_page_results, opt_notes, manua
         lines.append("RESULT: All automated checks passed. Complete manual checklist before closing.")
     return "\n".join(lines)
 
+def render_stored_results():
+    """Render results from session state without rerunning checks."""
+    if not st.session_state.get("results_ready"):
+        return
+
+    redirect_results = st.session_state.get("redirect_results", [])
+    on_page_results = st.session_state.get("on_page_results", [])
+    manual_items = st.session_state.get("manual_items", [])
+    report_text = st.session_state.get("report_text", "")
+
+    if redirect_results:
+        st.subheader(f"Redirect Results ({len(redirect_results)} URLs)")
+        for url, status, detail in redirect_results:
+            st.markdown(f"**{url}**")
+            render_auto_result("Redirect", status, detail)
+            st.divider()
+
+    if manual_items:
+        st.subheader("Manual Checklist")
+        st.caption("Check off each item as you complete it.")
+        for i, item in enumerate(manual_items):
+            st.checkbox(item, key=f"manual_{i}")
+        st.divider()
+
+    if on_page_results:
+        st.subheader(f"Automated Page Checks ({len(on_page_results)} URLs)")
+        for url, checks in on_page_results:
+            st.markdown(f"**{url}**")
+            for label, status, detail in checks:
+                render_auto_result(label, status, detail)
+            st.divider()
+
+    all_statuses = [s for _, checks in on_page_results for _, s, _ in checks]
+    all_statuses += [s for _, s, _ in redirect_results]
+    fails = all_statuses.count("fail")
+    warns = all_statuses.count("warn")
+
+    if fails:
+        st.error(f"{fails} item(s) failed — review before closing the Teamwork task.")
+    elif warns:
+        st.warning(f"{warns} warning(s) — review and confirm before closing.")
+    else:
+        st.success("All automated checks passed. Complete the manual checklist above before closing.")
+
+    st.subheader("Report")
+    st.code(report_text, language=None)
+    st.download_button(
+        label="Download Report (.txt)",
+        data=report_text,
+        file_name=f"opts_qa_{st.session_state.get('client_name','').replace(' ','_')}_{st.session_state.get('month_label','').replace(' ','_')}.txt",
+        mime="text/plain"
+    )
+
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("VDS On-Page Opts QA")
 st.caption("Paste optimizations from the SEO Planning Workbook to run QA checks before closing your Teamwork task.")
@@ -420,7 +429,7 @@ opt_notes = st.text_area(
 
 primary_keyword = st.text_input(
     "Primary keyword (optional)",
-    placeholder="e.g. AC repair Cincinnati — if entered, the tool checks for it in Title, H1, and Meta Description"
+    placeholder="e.g. AC repair Cincinnati — checks for it in Title, H1, and Meta Description"
 )
 
 if opt_notes.strip():
@@ -482,12 +491,10 @@ if run_btn:
         manual_items = []
 
     redirect_results = []
+    on_page_results = []
 
-    # Redirect checks
     if redirect_urls:
-        st.subheader(f"Redirect Results ({len(redirect_urls)} URLs)")
         prog_r = st.progress(0, text="Checking redirects...")
-        redirect_results = []
         for i, url in enumerate(redirect_urls):
             prog_r.progress(i / len(redirect_urls), text=f"Checking {i+1}/{len(redirect_urls)}...")
             code, final, hops = check_redirect(url)
@@ -501,51 +508,30 @@ if run_btn:
                 redirect_results.append((url, "warn", f"Redirect chain ({hops} hops) to: {final}"))
             else:
                 redirect_results.append((url, "fail", f"HTTP {code} — not resolving correctly"))
-            st.markdown(f"**{url}**")
-            render_auto_result("Redirect", redirect_results[-1][1], redirect_results[-1][2])
-            st.divider()
         prog_r.progress(1.0, text="Redirect checks complete.")
 
-    # Manual checklist
-    if manual_items:
-        st.subheader("Manual Checklist")
-        st.caption("Complete these items manually before closing the Teamwork task.")
-        for item in manual_items:
-            st.checkbox(item, key=f"manual_{item[:40]}")
-        st.divider()
-
-    # Auto page checks
-    on_page_results = []
     if onpage_urls:
-        st.subheader(f"Automated Page Checks ({len(onpage_urls)} URLs)")
         prog = st.progress(0, text="Checking pages...")
         for i, url in enumerate(onpage_urls):
             prog.progress(i / len(onpage_urls), text=f"Checking {i+1}/{len(onpage_urls)}: {url[:60]}...")
             checks = qa_onpage_url(url, checks_config, primary_keyword)
             on_page_results.append((url, checks))
-            st.markdown(f"**{url}**")
-            for label, status, detail in checks:
-                render_auto_result(label, status, detail)
-            st.divider()
         prog.progress(1.0, text="Done.")
 
-    # Summary
-    all_statuses = [s for _, checks in on_page_results for _, s, _ in checks]
-    all_statuses += [s for _, s, _ in redirect_results]
-    fails = all_statuses.count("fail")
-    warns = all_statuses.count("warn")
-
-    if fails:
-        st.error(f"{fails} item(s) failed — review before closing the Teamwork task.")
-    elif warns:
-        st.warning(f"{warns} warning(s) — review and confirm before closing.")
-    else:
-        st.success("All automated checks passed. Complete the manual checklist above before closing.")
-
-    st.subheader("Copy Report to Teamwork")
     report_text = results_to_text(
         month_label, specialist_name, client_name,
         on_page_results, opt_notes, manual_items,
         redirect_results, primary_keyword
     )
-    st.code(report_text, language=None)
+
+    # Store everything in session state
+    st.session_state["results_ready"] = True
+    st.session_state["redirect_results"] = redirect_results
+    st.session_state["on_page_results"] = on_page_results
+    st.session_state["manual_items"] = manual_items
+    st.session_state["report_text"] = report_text
+    st.session_state["client_name"] = client_name
+    st.session_state["month_label"] = month_label
+
+# Always render from session state so checkboxes don't wipe results
+render_stored_results()
