@@ -307,58 +307,115 @@ def render_auto_result(label, status, detail):
     else:
         st.warning(f"{ic} **{label}:** {detail}")
 
-def results_to_text(month, specialist, client, on_page_results, opt_notes, manual_items, redirect_results, primary_keyword):
-    lines = [
-        "VDS ON-PAGE OPTS QA REPORT",
-        f"Client: {client or 'Not specified'}",
-        f"Month: {month or 'Not specified'}",
-        f"Specialist: {specialist or 'Not specified'}",
-        f"Run: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        "=" * 60,
-    ]
-    if opt_notes:
-        lines.append(f"\nOPT NOTES:\n{opt_notes}")
-    if primary_keyword:
-        lines.append(f"\nPrimary Keyword: {primary_keyword}")
-    if manual_items:
-        lines.append("\nMANUAL CHECKLIST:")
-        for item in manual_items:
-            lines.append(f"  ☑️ {item}")
-    if redirect_results:
-        lines.append("\nREDIRECT CHECKS")
-        lines.append("-" * 40)
-        for url, status, detail in redirect_results:
-            lines.append(f"  {icon(status)} {url}")
-            lines.append(f"     {detail}")
-    if on_page_results:
-        lines.append("\nAUTOMATED PAGE CHECKS")
-        lines.append("-" * 40)
-        for url, checks in on_page_results:
-            lines.append(f"\n{url}")
-            for label, status, detail in checks:
-                lines.append(f"  {icon(status)} {label}: {detail}")
-    lines.append("\n" + "=" * 60)
+def results_to_html(month, specialist, client, on_page_results, opt_notes, manual_items, redirect_results, primary_keyword):
     fails = sum(1 for _, checks in on_page_results for _, s, _ in checks if s == "fail")
     warns = sum(1 for _, checks in on_page_results for _, s, _ in checks if s == "warn")
     redirect_fails = sum(1 for _, s, _ in redirect_results if s == "fail")
     total_fails = fails + redirect_fails
+
     if total_fails:
-        lines.append(f"RESULT: {total_fails} FAIL(s), {warns} warning(s) — needs attention before closing.")
+        summary_color = "#c0392b"
+        summary_bg = "#fdecea"
+        summary_text = f"{total_fails} FAIL(s), {warns} warning(s) — needs attention before closing."
     elif warns:
-        lines.append(f"RESULT: {warns} warning(s) — review before closing.")
+        summary_color = "#d68910"
+        summary_bg = "#fef9e7"
+        summary_text = f"{warns} warning(s) — review before closing."
     else:
-        lines.append("RESULT: All automated checks passed. Complete manual checklist before closing.")
-    return "\n".join(lines)
+        summary_color = "#1a7d3a"
+        summary_bg = "#eafaf1"
+        summary_text = "All automated checks passed. Complete manual checklist before closing."
+
+    def status_style(status):
+        if status == "pass":
+            return "background:#eafaf1; color:#1a7d3a; border-left:4px solid #1a7d3a;"
+        elif status == "fail":
+            return "background:#fdecea; color:#c0392b; border-left:4px solid #c0392b;"
+        else:
+            return "background:#fef9e7; color:#b7770d; border-left:4px solid #e6ac00;"
+
+    def status_badge(status):
+        colors = {"pass": "#1a7d3a", "fail": "#c0392b", "warn": "#d68910"}
+        labels = {"pass": "PASS", "fail": "FAIL", "warn": "WARN"}
+        c = colors.get(status, "#888")
+        l = labels.get(status, status.upper())
+        return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:700;">{l}</span>'
+
+    page_rows_html = ""
+    for url, checks in on_page_results:
+        page_rows_html += f"""
+        <div style="margin-bottom:20px;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;">
+          <div style="background:#231F20;color:white;padding:10px 14px;font-size:12px;font-weight:600;word-break:break-all;">{url}</div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead><tr style="background:#f5f5f5;">
+              <th style="padding:7px 12px;text-align:left;width:160px;border-bottom:1px solid #ddd;">Check</th>
+              <th style="padding:7px 12px;text-align:left;width:60px;border-bottom:1px solid #ddd;">Status</th>
+              <th style="padding:7px 12px;text-align:left;border-bottom:1px solid #ddd;">Detail</th>
+            </tr></thead><tbody>"""
+        for label, status, detail in checks:
+            page_rows_html += f"""
+            <tr style="{status_style(status)}">
+              <td style="padding:7px 12px;font-weight:600;border-bottom:1px solid #eee;">{label}</td>
+              <td style="padding:7px 12px;border-bottom:1px solid #eee;">{status_badge(status)}</td>
+              <td style="padding:7px 12px;border-bottom:1px solid #eee;word-break:break-word;">{detail}</td>
+            </tr>"""
+        page_rows_html += "</tbody></table></div>"
+
+    redirect_html = ""
+    if redirect_results:
+        redirect_html = "<h2 style='color:#231F20;margin-top:28px;font-size:16px;'>Redirect Checks</h2>"
+        redirect_html += "<table style='width:100%;border-collapse:collapse;font-size:12px;'><thead><tr style='background:#f5f5f5;'><th style='padding:7px 12px;text-align:left;border-bottom:1px solid #ddd;'>URL</th><th style='padding:7px 12px;width:60px;border-bottom:1px solid #ddd;'>Status</th><th style='padding:7px 12px;text-align:left;border-bottom:1px solid #ddd;'>Detail</th></tr></thead><tbody>"
+        for url, status, detail in redirect_results:
+            redirect_html += f"<tr style='{status_style(status)}'><td style='padding:7px 12px;border-bottom:1px solid #eee;word-break:break-all;'>{url}</td><td style='padding:7px 12px;border-bottom:1px solid #eee;'>{status_badge(status)}</td><td style='padding:7px 12px;border-bottom:1px solid #eee;'>{detail}</td></tr>"
+        redirect_html += "</tbody></table>"
+
+    manual_html = ""
+    if manual_items:
+        manual_html = "<h2 style='color:#231F20;margin-top:28px;font-size:16px;'>Manual Checklist</h2><table style='width:100%;border-collapse:collapse;font-size:12px;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;'>"
+        for i, item in enumerate(manual_items):
+            bg = "#fff" if i % 2 == 0 else "#f9f9f9"
+            manual_html += f"<tr style='background:{bg};'><td style='padding:8px 14px;border-bottom:1px solid #eee;'>☑️ {item}</td></tr>"
+        manual_html += "</table>"
+
+    opt_html = f"<p style='background:#f7f7f7;padding:12px;border-left:4px solid #E21B23;border-radius:0 4px 4px 0;font-size:12px;color:#444;margin-bottom:16px;'>{opt_notes.replace(chr(10), '<br>')}</p>" if opt_notes else ""
+    kw_html = f"<p style='font-size:12px;margin-bottom:16px;'><strong>Primary Keyword:</strong> {primary_keyword}</p>" if primary_keyword else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VDS Opts QA — {client or 'Client'} {month or ''}</title>
+<style>
+  body {{ font-family: 'Helvetica Neue', Arial, sans-serif; color: #231F20; max-width: 960px; margin: 0 auto; padding: 28px 20px; }}
+  @media print {{ body {{ padding: 12px; }} }}
+</style>
+</head>
+<body>
+  <div style="background:#E21B23;padding:18px 24px;border-radius:8px;margin-bottom:24px;">
+    <h1 style="color:white;margin:0;font-size:18px;">VDS On-Page Opts QA Report</h1>
+    <p style="color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:12px;">
+      {client or 'Client not specified'} &nbsp;|&nbsp; {month or 'Month not specified'} &nbsp;|&nbsp; Specialist: {specialist or 'Not specified'} &nbsp;|&nbsp; Run: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+    </p>
+  </div>
+  <div style="background:{summary_bg};color:{summary_color};padding:12px 16px;border-radius:6px;font-weight:600;margin-bottom:20px;font-size:13px;">
+    {summary_text}
+  </div>
+  {opt_html}{kw_html}{manual_html}{redirect_html}
+  <h2 style="color:#231F20;margin-top:28px;font-size:16px;">Automated Page Checks</h2>
+  {page_rows_html}
+</body>
+</html>"""
 
 def render_stored_results():
-    """Render results from session state without rerunning checks."""
     if not st.session_state.get("results_ready"):
         return
 
     redirect_results = st.session_state.get("redirect_results", [])
     on_page_results = st.session_state.get("on_page_results", [])
     manual_items = st.session_state.get("manual_items", [])
-    report_text = st.session_state.get("report_text", "")
+    html_report = st.session_state.get("html_report", "")
+    client_name = st.session_state.get("client_name", "")
+    month_label = st.session_state.get("month_label", "")
 
     if redirect_results:
         st.subheader(f"Redirect Results ({len(redirect_results)} URLs)")
@@ -394,13 +451,13 @@ def render_stored_results():
     else:
         st.success("All automated checks passed. Complete the manual checklist above before closing.")
 
-    st.subheader("Report")
-    st.code(report_text, language=None)
+    fname = f"opts_qa_{client_name.replace(' ','_')}_{month_label.replace(' ','_')}.html"
     st.download_button(
-        label="Download Report (.txt)",
-        data=report_text,
-        file_name=f"opts_qa_{st.session_state.get('client_name','').replace(' ','_')}_{st.session_state.get('month_label','').replace(' ','_')}.txt",
-        mime="text/plain"
+        label="Download Report (HTML — open in browser, then File > Print > Save as PDF)",
+        data=html_report,
+        file_name=fname,
+        mime="text/html",
+        type="primary"
     )
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
@@ -469,7 +526,7 @@ st.caption("If the opt notes mention 404s or redirects, paste those URLs here to
 redirect_input = st.text_area(
     "URLs to check for redirects",
     height=100,
-    placeholder="https://www.herrmannservices.com/old-broken-page/\nhttps://www.herrmannservices.com/another-404/",
+    placeholder="https://www.herrmannservices.com/old-broken-page/",
     label_visibility="collapsed"
 )
 
@@ -518,20 +575,18 @@ if run_btn:
             on_page_results.append((url, checks))
         prog.progress(1.0, text="Done.")
 
-    report_text = results_to_text(
+    html_report = results_to_html(
         month_label, specialist_name, client_name,
         on_page_results, opt_notes, manual_items,
         redirect_results, primary_keyword
     )
 
-    # Store everything in session state
     st.session_state["results_ready"] = True
     st.session_state["redirect_results"] = redirect_results
     st.session_state["on_page_results"] = on_page_results
     st.session_state["manual_items"] = manual_items
-    st.session_state["report_text"] = report_text
+    st.session_state["html_report"] = html_report
     st.session_state["client_name"] = client_name
     st.session_state["month_label"] = month_label
 
-# Always render from session state so checkboxes don't wipe results
 render_stored_results()
