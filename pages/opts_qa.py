@@ -371,11 +371,28 @@ def results_to_html(month, specialist, client, on_page_results, opt_notes, manua
 
     manual_html = ""
     if manual_items:
-        manual_html = "<h2 style='color:#231F20;margin-top:28px;font-size:16px;'>Manual Checklist</h2><table style='width:100%;border-collapse:collapse;font-size:12px;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;'>"
+        manual_html = """<h2 style='color:#231F20;margin-top:28px;font-size:16px;'>Manual Checklist</h2>
+<table style='width:100%;border-collapse:collapse;font-size:12px;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;'>
+  <thead><tr style='background:#f5f5f5;'>
+    <th style='padding:8px 12px;text-align:left;border-bottom:1px solid #ddd;width:32px;'></th>
+    <th style='padding:8px 12px;text-align:left;border-bottom:1px solid #ddd;'>Item</th>
+    <th style='padding:8px 12px;text-align:left;border-bottom:1px solid #ddd;width:90px;'>Initials</th>
+  </tr></thead><tbody>"""
         for i, item in enumerate(manual_items):
             bg = "#fff" if i % 2 == 0 else "#f9f9f9"
-            manual_html += f"<tr style='background:{bg};'><td style='padding:8px 14px;border-bottom:1px solid #eee;'>☑️ {item}</td></tr>"
-        manual_html += "</table>"
+            cid = f"chk_{i}"
+            manual_html += f"""<tr style='background:{bg};'>
+  <td style='padding:8px 12px;border-bottom:1px solid #eee;text-align:center;'>
+    <input type='checkbox' id='{cid}' style='width:16px;height:16px;cursor:pointer;accent-color:#E21B23;'>
+  </td>
+  <td style='padding:8px 12px;border-bottom:1px solid #eee;'>
+    <label for='{cid}' style='cursor:pointer;'>{item}</label>
+  </td>
+  <td style='padding:8px 12px;border-bottom:1px solid #eee;'>
+    <input type='text' maxlength='5' placeholder='initials' style='width:70px;border:1px solid #ddd;border-radius:3px;padding:3px 6px;font-size:12px;text-align:center;'>
+  </td>
+</tr>"""
+        manual_html += "</tbody></table>"
 
     opt_html = f"<p style='background:#f7f7f7;padding:12px;border-left:4px solid #E21B23;border-radius:0 4px 4px 0;font-size:12px;color:#444;margin-bottom:16px;'>{opt_notes.replace(chr(10), '<br>')}</p>" if opt_notes else ""
     kw_html = f"<p style='font-size:12px;margin-bottom:16px;'><strong>Primary Keyword:</strong> {primary_keyword}</p>" if primary_keyword else ""
